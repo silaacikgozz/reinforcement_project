@@ -1,0 +1,23 @@
+# Section-4 ablation, arm 2: target network OFF. Same as configs/dqn.yaml in
+# every other way -- the only difference is target_network: false. Compare
+# this run's learning curves / final cost against configs/dqn.yaml (target
+# network ON) for the ablation in the report.
+
+env_config: simulator/configs/eval_standard.yaml
+
+variant: dqn
+target_network: false   # <-- the ablated setting
+
+seeds: [0, 1, 2]
+
+lr: 0.0001
+gamma: 0.99
+batch_size: 64
+buffer_size: 100000
+train_steps: 200000
+target_update_every: 1000   # unused when target_network is false, kept for symmetry
+epsilon_start: 1.0
+epsilon_end: 0.05
+epsilon_decay_steps: 100000
+hidden_sizes: [256, 256]
+eval_every: 10000

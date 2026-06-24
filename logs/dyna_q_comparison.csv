@@ -1,0 +1,5 @@
+method,cost_per_order_mean,cost_per_order_std
+random,18.497899561688307,
+greedy_nearest,4.308961333323208,
+milp_rolling,4.281738112644461,
+dyna_q,63.96630294400668,3.709881341292349

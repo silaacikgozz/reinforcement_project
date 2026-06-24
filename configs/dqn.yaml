@@ -1,0 +1,23 @@
+# Role A — DQN family config. Every number the training script uses must live
+# here, not hardcoded in code (Section 6 of the spec).
+# Validated by smoke tests (no NaN/exploding loss for 3k+ steps) and a 160k-step
+# diagnostic run -- see code/role_a_dqn/README.md "Empirical notes" section.
+
+env_config: simulator/configs/eval_standard.yaml
+
+variant: dqn          # dqn | double_dqn | dueling_dqn   (switch for the ablation/runs)
+target_network: true  # ablation toggle A — set false to run the no-target-network arm
+
+seeds: [0, 1, 2]
+
+lr: 0.0001
+gamma: 0.99
+batch_size: 64
+buffer_size: 100000
+train_steps: 200000
+target_update_every: 1000
+epsilon_start: 1.0
+epsilon_end: 0.05
+epsilon_decay_steps: 100000
+hidden_sizes: [256, 256]
+eval_every: 10000
