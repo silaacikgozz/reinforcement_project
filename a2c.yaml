@@ -1,0 +1,7 @@
+lr: 0.0003
+gamma: 0.99
+gae_lambda: 0.95
+entropy_coef: 0.01
+value_coef: 0.5
+episodes: 200
+hidden_dim: 128

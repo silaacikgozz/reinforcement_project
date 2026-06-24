@@ -14,6 +14,14 @@ if CODE_DIR not in sys.path:
 
 from dqn_agent import DQNAgent
 from dynaq_agent import DynaQAgent
+from a2c_agent import A2CAgent  
+
+class A2CEvalWrapper:
+    """Simülatörün test esnasında sadece tek bir int aksiyon alması için sarmalayıcı sınıf."""
+    def __init__(self, agent):
+        self.agent = agent
+    def act(self, obs):
+        return self.agent.act(obs)[0]
 
 def get_flat_dim(obs):
     flat_list = []
@@ -81,11 +89,25 @@ def evaluate_our_policy():
         agent_dynaq.q_table = np.load(dynaq_weight, allow_pickle=True).item()
     agent_dynaq.epsilon = 0.0
 
+    # --- ROL B YÜKLEME (NİSA) ---
+    config_a2c = {}
+    if os.path.exists("configs/a2c.yaml"):
+        with open("configs/a2c.yaml", "r") as f:
+            config_a2c = yaml.safe_load(f)
+    agent_a2c = A2CAgent(state_dim, action_dim, config_a2c)
+    
+    a2c_weight = os.path.join(CURRENT_DIR, "weights", "a2c_seed0.pt")
+    if os.path.exists(a2c_weight):
+        agent_a2c.network.load_state_dict(torch.load(a2c_weight, map_location=agent_a2c.device))
+    
+    agent_a2c_eval = A2CEvalWrapper(agent_a2c)
+
     print("Bütün modeller test ediliyor (Bu işlem biraz sürebilir)...")
     metrics_dqn = evaluate(agent_dqn, env_config, seeds=seeds)
     metrics_double = evaluate(agent_double, env_config, seeds=seeds)
     metrics_dueling = evaluate(agent_dueling, env_config, seeds=seeds)
     metrics_dynaq = evaluate(agent_dynaq, env_config, seeds=seeds)
+    metrics_a2c = evaluate(agent_a2c_eval, env_config, seeds=seeds)  
     
     # Skorları Çıkarma
     r_score = extract_mean_score(rand_metrics)
@@ -94,6 +116,7 @@ def evaluate_our_policy():
     score_double = extract_mean_score(metrics_double)
     score_dueling = extract_mean_score(metrics_dueling)
     score_dynaq = extract_mean_score(metrics_dynaq)
+    score_a2c = extract_mean_score(metrics_a2c)  
     
     # Nihai Karşılaştırma Tablosu
     print("\n" + "="*55)
@@ -105,6 +128,7 @@ def evaluate_our_policy():
     print(f"{'DQN (double)':<25} | {score_double:<25.4f}")
     print(f"{'DQN (dueling)':<25} | {score_dueling:<25.4f}")
     print(f"{'Dyna-Q':<25} | {score_dynaq:<25.4f}")
+    print(f"{'A2C (Nisa)':<25} | {score_a2c:<25.4f}")  
     print("="*55)
 
 if __name__ == "__main__":
