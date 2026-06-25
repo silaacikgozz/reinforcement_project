@@ -1,0 +1,19 @@
+# Role B — REINFORCE + GAE. rollout_steps: null means "update once per
+# finished episode" (the Monte-Carlo policy-gradient pattern).
+
+env_config: simulator/configs/eval_standard.yaml
+
+variant: reinforce_gae
+rollout_steps: null
+
+seeds: [0, 1, 2]
+
+lr: 0.0001
+gamma: 0.99
+gae_lambda: 1.0          # full Monte-Carlo credit within the episode (no bootstrap cutoff)
+value_coef: 0.5
+entropy_coef: 0.01
+normalize_advantages: true   # ablation toggle B (other arm: GAE lambda sweep)
+train_steps: 60000
+hidden_sizes: [256, 256]
+eval_every: 10000
