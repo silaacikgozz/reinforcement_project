@@ -1,0 +1,19 @@
+# Role B ablation, Section 4 requirement: advantage normalization on/off.
+# Identical to configs/a2c.yaml except normalize_advantages: false.
+
+env_config: simulator/configs/eval_standard.yaml
+
+variant: a2c_noadvnorm
+rollout_steps: 20
+
+seeds: [0, 1, 2]
+
+lr: 0.0003
+gamma: 0.99
+gae_lambda: 0.95
+value_coef: 0.5
+entropy_coef: 0.01
+normalize_advantages: false   # <-- the ablated setting
+train_steps: 60000
+hidden_sizes: [256, 256]
+eval_every: 10000

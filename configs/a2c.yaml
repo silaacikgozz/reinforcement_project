@@ -1,0 +1,20 @@
+# Role B — A2C. rollout_steps is an integer: update every N environment
+# steps regardless of episode boundaries, bootstrapping the value of the
+# cut-off state from the critic.
+
+env_config: simulator/configs/eval_standard.yaml
+
+variant: a2c
+rollout_steps: 20
+
+seeds: [0, 1, 2]
+
+lr: 0.0003
+gamma: 0.99
+gae_lambda: 0.95
+value_coef: 0.5
+entropy_coef: 0.01
+normalize_advantages: true
+train_steps: 60000
+hidden_sizes: [256, 256]
+eval_every: 10000
