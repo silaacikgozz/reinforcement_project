@@ -1,7 +1,0 @@
-lr: 0.01
-gamma: 0.95
-epsilon_start: 1.0
-epsilon_min: 0.1
-epsilon_decay: 0.98
-planning_steps: 50  # Kılavuzdaki zorunlu ablasyon parametremiz (n sweep)
-episodes: 200

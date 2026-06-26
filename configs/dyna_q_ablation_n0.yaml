@@ -1,0 +1,15 @@
+env_config: simulator/configs/eval_standard.yaml
+variant: dyna_q_n0
+seeds: [0, 1, 2]
+planning_steps: 0   # ablation arm: no planning at all (= plain DQN + model training only, model unused)
+lr: 0.0001
+gamma: 0.99
+batch_size: 64
+buffer_size: 100000
+train_steps: 60000
+target_update_every: 1000
+epsilon_start: 1.0
+epsilon_end: 0.05
+epsilon_decay_steps: 100000
+hidden_sizes: [256, 256]
+eval_every: 10000
