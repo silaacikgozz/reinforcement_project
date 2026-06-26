@@ -1,0 +1,12 @@
+run_name: offline_naive
+n_actions: 169
+hidden_sizes: [256, 256]
+lr: 0.0001
+gamma: 0.99
+batch_size: 64
+train_steps: 30000
+target_update_every: 1000
+eval_every: 2000
+seed: 0
+weights_path: ../../weights/offline_naive.pt
+log_path: ../../logs/offline_naive.csv
