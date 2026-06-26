@@ -1,0 +1,44 @@
+# Role B — DDPG, TD3-stabilized, on DroneControl-v0.
+#
+# Updated after diagnosing a vanilla-DDPG run (see
+# code/role_b_policy/ddpg/README.md, "Engineering Notes"): the original
+# config converged to a near-zero-movement / stuck-at-boundary policy with
+# growing critic overestimation (success_rate stayed at 0.00 for the entire
+# run). Three things changed:
+#   1. Twin critics + target policy smoothing + delayed actor updates
+#      (TD3, Fujimoto et al. 2018) — implemented unconditionally in
+#      agent.py, not a toggle, since the diagnosis pointed squarely at
+#      single-critic overestimation as the mechanism.
+#   2. Exploration noise no longer decays near zero — see noise_end below.
+#   3. Longer warmup and training budget to give the fix room to work.
+
+env_config: simulator/configs/eval_standard.yaml
+
+variant: ddpg
+seeds: [0, 1, 2]
+
+actor_lr: 0.0001
+critic_lr: 0.001
+gamma: 0.99
+tau: 0.005
+batch_size: 64
+buffer_size: 100000
+warmup_steps: 2000
+train_steps: 80000
+
+# Exploration: noise_end is deliberately not near-zero. In the vanilla-DDPG
+# attempt, noise decaying to 0.05 let a policy that had collapsed into a
+# fixed point (identical observation forever, e.g. pinned against a grid
+# boundary) go unperturbed for the rest of training. A real floor keeps it
+# escapable throughout.
+noise_start: 0.4
+noise_end: 0.15
+noise_decay_steps: 50000
+
+# TD3-specific knobs (agent.py)
+policy_delay: 2
+target_noise_std: 0.2
+target_noise_clip: 0.5
+
+hidden_sizes: [128, 128]
+eval_every: 2000
