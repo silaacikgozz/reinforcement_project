@@ -1,135 +1,162 @@
-import os
-import sys
-import yaml
-import gymnasium as gym
-import drone_dispatch_env
-from drone_dispatch_env import Config, evaluate, GreedyNearest, RandomPolicy
-import torch
-import numpy as np
+"""Single entry point graders run: loads every saved model across all
+roles + joint components and prints the full results table vs baselines.
+Self-contained on purpose (network classes defined inline, not imported
+from each role's folder) to avoid module-name collisions across role_a_dqn/
+role_b_policy/role_c_planning, all of which have their own agent.py/
+train.py/networks.py.
 
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-CODE_DIR = os.path.join(CURRENT_DIR, "code")
-if CODE_DIR not in sys.path:
-    sys.path.append(CODE_DIR)
+Usage: python run_all.py --config simulator/configs/eval_standard.yaml --seeds 0,1,2,3,4
+"""
+from __future__ import annotations
+import argparse, json, os, sys
+import numpy as np, torch, torch.nn as nn, yaml
+from drone_dispatch_env import Config, evaluate, make_baseline
 
-from dqn_agent import DQNAgent
-from dynaq_agent import DynaQAgent
-from a2c_agent import A2CAgent  
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "code"))
+from common.obs_encoding import flatten_obs, flat_dim  # noqa: E402
 
-class A2CEvalWrapper:
-    """Simülatörün test esnasında sadece tek bir int aksiyon alması için sarmalayıcı sınıf."""
-    def __init__(self, agent):
-        self.agent = agent
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+# ---------- inline network definitions (mirror each role's, kept independent) ----------
+def _mlp(in_dim, hidden, out_dim):
+    layers, prev = [], in_dim
+    for h in hidden:
+        layers += [nn.Linear(prev, h), nn.ReLU()]; prev = h
+    layers.append(nn.Linear(prev, out_dim))
+    return nn.Sequential(*layers)
+
+class QNetwork(nn.Module):
+    def __init__(self, obs_dim, n_actions, hidden=(256, 256)):
+        super().__init__()
+        layers, prev = [], obs_dim
+        for h in hidden:
+            layers += [nn.Linear(prev, h), nn.ReLU()]; prev = h
+        self.trunk = nn.Sequential(*layers)
+        self.head = nn.Linear(prev, n_actions)
+    def forward(self, x): return self.head(self.trunk(x))
+
+class DuelingQNetwork(nn.Module):
+    def __init__(self, obs_dim, n_actions, hidden=(256, 256)):
+        super().__init__()
+        layers, prev = [], obs_dim
+        for h in hidden: layers += [nn.Linear(prev, h), nn.ReLU()]; prev = h
+        self.trunk = nn.Sequential(*layers)
+        self.value_head = nn.Linear(prev, 1); self.advantage_head = nn.Linear(prev, n_actions)
+    def forward(self, x):
+        h = self.trunk(x); v = self.value_head(h); a = self.advantage_head(h)
+        return v + (a - a.mean(dim=1, keepdim=True))
+
+class PolicyValueNet(nn.Module):  # Role B discrete (REINFORCE/A2C) -- policy head only needed here
+    def __init__(self, obs_dim, n_actions, hidden=(256, 256)):
+        super().__init__()
+        layers, prev = [], obs_dim
+        for h in hidden: layers += [nn.Linear(prev, h), nn.ReLU()]; prev = h
+        self.trunk = nn.Sequential(*layers)
+        self.policy_head = nn.Linear(prev, n_actions)
+        self.value_head = nn.Linear(prev, 1)
+    def forward(self, x): return self.policy_head(self.trunk(x))
+
+
+# ---------- policy wrappers ----------
+class MaskedQPolicy:
+    def __init__(self, net, env_cfg): self.net, self.env_cfg = net, env_cfg
     def act(self, obs):
-        return self.agent.act(obs)[0]
+        vec = flatten_obs(obs, self.env_cfg)
+        with torch.no_grad():
+            q = self.net(torch.as_tensor(vec, dtype=torch.float32).unsqueeze(0)).squeeze(0).numpy()
+        return int(np.argmax(np.where(obs["action_mask"].astype(bool), q, -np.inf)))
 
-def get_flat_dim(obs):
-    flat_list = []
-    for k, v in obs.items():
-        if k != "action_mask":
-            if isinstance(v, np.ndarray): flat_list.extend(v.flatten())
-            elif isinstance(v, (int, float)): flat_list.append(v)
-            elif isinstance(v, dict):
-                for sk, sv in v.items():
-                    if isinstance(sv, np.ndarray): flat_list.extend(sv.flatten())
-                    elif isinstance(sv, (int, float)): flat_list.append(sv)
-    return len(flat_list)
+class OfflinePolicy:
+    def __init__(self, net): self.net = net
+    def act(self, obs):
+        vec = np.concatenate([obs["drones"].flatten(), obs["orders"].flatten(),
+                               obs["time"].astype(np.float32)]).astype(np.float32)
+        with torch.no_grad():
+            q = self.net(torch.as_tensor(vec, dtype=torch.float32).unsqueeze(0)).squeeze(0).numpy()
+        return int(np.argmax(np.where(obs["action_mask"].astype(bool), q, -np.inf)))
 
-def extract_mean_score(metrics_output):
-    if isinstance(metrics_output, (int, float)): return float(metrics_output)
-    if isinstance(metrics_output, dict):
-        if "mean" in metrics_output:
-            val = metrics_output["mean"]
-            if isinstance(val, dict): return float(val.get("cost_per_order", list(val.values())[0]))
-            return float(val)
-        for k, v in metrics_output.items():
-            if isinstance(v, (int, float)): return float(v)
-    return 999.0
 
-def evaluate_our_policy():
-    env_config = Config()
-    seeds = [0, 1, 2]
-    
-    print("Sistem baselineları test ediliyor...")
-    rand_metrics = evaluate(RandomPolicy(env_config), env_config, seeds=seeds)
-    greedy_metrics = evaluate(GreedyNearest(env_config), env_config, seeds=seeds)
-    
-    env = gym.make("DroneDispatch-v0")
-    obs, _ = env.reset(seed=0)
-    state_dim = get_flat_dim(obs)
-    action_dim = len(obs["action_mask"])
-                    
-    # --- ROL A YÜKLEME ---
-    with open("configs/dqn.yaml", "r") as f:
-        config_dqn = yaml.safe_load(f)
-    
-    agent_dqn = DQNAgent(state_dim, action_dim, config_dqn)
-    config_double = config_dqn.copy()
-    config_double["use_double"] = True
-    agent_double = DQNAgent(state_dim, action_dim, config_double)
-    agent_dueling = DQNAgent(state_dim, action_dim, config_dqn)
-    
-    dqn_weight = os.path.join(CURRENT_DIR, "weights", "dqn_seed0.pt")
-    if os.path.exists(dqn_weight):
-        agent_dqn.q_net.load_state_dict(torch.load(dqn_weight, map_location=agent_dqn.device))
-        agent_double.q_net.load_state_dict(torch.load(dqn_weight, map_location=agent_double.device))
-        agent_dueling.q_net.load_state_dict(torch.load(dqn_weight, map_location=agent_dueling.device))
-    
-    agent_dqn.epsilon = 0.0
-    agent_double.epsilon = 0.0
-    agent_dueling.epsilon = 0.0
+# ---------- per-method evaluation ----------
+def eval_seeded(config_path, eval_cfg, eval_seeds, net_class, obs_dim_fn, policy_class=MaskedQPolicy):
+    full_path = os.path.join(REPO_ROOT, config_path)
+    if not os.path.exists(full_path):
+        return None
+    with open(full_path) as f:
+        hp = yaml.safe_load(f)
+    obs_dim = obs_dim_fn(eval_cfg)
+    costs = []
+    for seed in hp.get("seeds", [0]):
+        wp = os.path.join(REPO_ROOT, "weights", f"{hp['variant']}_seed{seed}.pt")
+        if not os.path.exists(wp):
+            continue
+        net = net_class(obs_dim, eval_cfg.n_actions, hp["hidden_sizes"])
+        net.load_state_dict(torch.load(wp, map_location="cpu")); net.eval()
+        policy = policy_class(net) if policy_class is OfflinePolicy else policy_class(net, eval_cfg)
+        m = evaluate(policy, eval_cfg, eval_seeds)["mean"]
+        costs.append(m["cost_per_order"])
+    if not costs:
+        return None
+    return float(np.mean(costs)), float(np.std(costs))
 
-    # --- ROL C YÜKLEME ---
-    with open("configs/dynaq.yaml", "r") as f:
-        config_c = yaml.safe_load(f)
-    agent_dynaq = DynaQAgent(state_dim, action_dim, config_c)
-    
-    dynaq_weight = os.path.join(CURRENT_DIR, "weights", "dynaq_seed0.npy")
-    if os.path.exists(dynaq_weight):
-        agent_dynaq.q_table = np.load(dynaq_weight, allow_pickle=True).item()
-    agent_dynaq.epsilon = 0.0
 
-    # --- ROL B YÜKLEME (NİSA) ---
-    config_a2c = {}
-    if os.path.exists("configs/a2c.yaml"):
-        with open("configs/a2c.yaml", "r") as f:
-            config_a2c = yaml.safe_load(f)
-    agent_a2c = A2CAgent(state_dim, action_dim, config_a2c)
-    
-    a2c_weight = os.path.join(CURRENT_DIR, "weights", "a2c_seed0.pt")
-    if os.path.exists(a2c_weight):
-        agent_a2c.network.load_state_dict(torch.load(a2c_weight, map_location=agent_a2c.device))
-    
-    agent_a2c_eval = A2CEvalWrapper(agent_a2c)
+def eval_offline(weights_name, eval_cfg, eval_seeds):
+    wp = os.path.join(REPO_ROOT, "weights", f"{weights_name}.pt")
+    if not os.path.exists(wp):
+        return None
+    net = QNetwork(181, eval_cfg.n_actions, [256, 256])
+    net.load_state_dict(torch.load(wp, map_location="cpu")); net.eval()
+    m = evaluate(OfflinePolicy(net), eval_cfg, eval_seeds)["mean"]
+    return m["cost_per_order"], None
 
-    print("Bütün modeller test ediliyor (Bu işlem biraz sürebilir)...")
-    metrics_dqn = evaluate(agent_dqn, env_config, seeds=seeds)
-    metrics_double = evaluate(agent_double, env_config, seeds=seeds)
-    metrics_dueling = evaluate(agent_dueling, env_config, seeds=seeds)
-    metrics_dynaq = evaluate(agent_dynaq, env_config, seeds=seeds)
-    metrics_a2c = evaluate(agent_a2c_eval, env_config, seeds=seeds)  
-    
-    # Skorları Çıkarma
-    r_score = extract_mean_score(rand_metrics)
-    g_score = extract_mean_score(greedy_metrics)
-    score_dqn = extract_mean_score(metrics_dqn)
-    score_double = extract_mean_score(metrics_double)
-    score_dueling = extract_mean_score(metrics_dueling)
-    score_dynaq = extract_mean_score(metrics_dynaq)
-    score_a2c = extract_mean_score(metrics_a2c)  
-    
-    # Nihai Karşılaştırma Tablosu
-    print("\n" + "="*55)
-    print(f"{'Method':<25} | {'cost/order':<25}")
-    print("="*55)
-    print(f"{'random':<25} | {r_score:<25.4f}")
-    print(f"{'greedy_nearest':<25} | {g_score:<25.4f}")
-    print(f"{'DQN (dqn)':<25} | {score_dqn:<25.4f}")
-    print(f"{'DQN (double)':<25} | {score_double:<25.4f}")
-    print(f"{'DQN (dueling)':<25} | {score_dueling:<25.4f}")
-    print(f"{'Dyna-Q':<25} | {score_dynaq:<25.4f}")
-    print(f"{'A2C (Nisa)':<25} | {score_a2c:<25.4f}")  
-    print("="*55)
+
+MAIN_TABLE_METHODS = [
+    # (display name, config path, net class, dueling-style obs_dim fn)
+    ("dqn",            "configs/dqn.yaml",                     QNetwork,       flat_dim, MaskedQPolicy),
+    ("double_dqn",     "configs/double_dqn.yaml",               QNetwork,       flat_dim, MaskedQPolicy),
+    ("dueling_dqn",    "configs/dueling_dqn.yaml",               DuelingQNetwork, flat_dim, MaskedQPolicy),
+    ("reinforce_gae",  "configs/reinforce_gae.yaml",             PolicyValueNet, flat_dim, MaskedQPolicy),
+    ("a2c",            "configs/a2c.yaml",                       PolicyValueNet, flat_dim, MaskedQPolicy),
+    ("a2c_noadvnorm",  "configs/a2c_ablation_noadvnorm.yaml",    PolicyValueNet, flat_dim, MaskedQPolicy),
+    ("dyna_q",         "configs/dyna_q.yaml",                    QNetwork,       flat_dim, MaskedQPolicy),
+    ("dyna_q_n0",      "configs/dyna_q_ablation_n0.yaml",        QNetwork,       flat_dim, MaskedQPolicy),
+]
+OFFLINE_METHODS = ["offline_naive", "offline_cql", "offline_bc"]
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default="simulator/configs/eval_standard.yaml")
+    ap.add_argument("--seeds", default="0,1,2,3,4")
+    args = ap.parse_args()
+    cfg_path = args.config if os.path.isabs(args.config) else os.path.join(REPO_ROOT, args.config)
+    cfg = Config.from_yaml(cfg_path)
+    seeds = [int(s) for s in args.seeds.split(",") if s != ""]
+
+    results = {}
+    for name in ["random", "greedy_nearest", "milp_rolling"]:
+        m = evaluate(make_baseline(name, cfg), cfg, seeds)["mean"]
+        results[name] = {"cost_per_order_mean": m["cost_per_order"], "cost_per_order_std": None}
+
+    for name, config_path, net_class, dim_fn, policy_class in MAIN_TABLE_METHODS:
+        r = eval_seeded(config_path, cfg, seeds, net_class, dim_fn, policy_class)
+        results[name] = ({"cost_per_order_mean": r[0], "cost_per_order_std": r[1]} if r is not None
+                          else {"cost_per_order_mean": None, "cost_per_order_std": None, "note": "weights not found"})
+
+    for name in OFFLINE_METHODS:
+        r = eval_offline(name, cfg, seeds)
+        results[name] = ({"cost_per_order_mean": r[0], "cost_per_order_std": r[1]} if r is not None
+                          else {"cost_per_order_mean": None, "cost_per_order_std": None, "note": "weights not found"})
+
+    print("=== Main table (DroneDispatch-v0, cost_per_order, lower is better) ===")
+    print(json.dumps(results, indent=2))
+
+    print("\n=== DDPG (DroneControl-v0) -- different env/metric, reported separately ===")
+    print("see weights/ddpg_seed*_best.pt; run code/role_b_policy/ddpg/evaluate_agent.py for success_rate")
+
+    print("\n=== Multi-agent IDQN -- different env/metric, reported separately ===")
+    print("see weights/idqn_seed0.pt; run code/multi_agent/evaluate_agent.py for team_return")
+
 
 if __name__ == "__main__":
-    evaluate_our_policy()
+    main()
